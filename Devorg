@@ -1,0 +1,102 @@
+name: Dev-Org
+
+on:
+  workflow_dispatch:
+    inputs:
+      src-branch-name:
+        description: 'Source branch to checkout in this repository'
+        required: true
+        default: 'DevOrg'
+      manual_commit_id:
+        description: 'Manual commit ID'
+        required: false
+        default: 'default'
+      test_level:
+        description: 'Enter type of test case to be checked'
+        required: true
+        type: choice
+        options:
+          - NoTestRun
+          - RunSpecifiedTests
+          - RunLocalTests
+          - RunAllTestsInOrg
+        default: RunSpecifiedTests
+      test_classes:
+        description: 'Test classes'
+        required: false
+        default: ''
+
+env:
+        DEV_ORG_USERNAME: ${{ vars.DEV_USERNAME }}
+        DEV_ORG_PASSWORD: ${{ secrets.DEV_PASSWORD }}
+        DEV_ORG_URL: ${{ vars.DEV_URL }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+
+          ref: 'none'
+
+          fetch-depth: 0 # This ensures the full commit history is available
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16.x'
+
+      - name: Install SFDX CLI and plugins
+        run: |
+          npm install sfdx-cli --global
+          sfdx --version
+          echo 'y' | sfdx plugins:install sfpowerkit
+
+      - name: Determine commit IDs and generate delta
+        id: commit_delta
+        run: |
+
+          LATEST_COMMIT_ID=$(git log -n 1 origin/${{ github.event.inputs.src-branch-name }} --pretty=format:'%H')
+
+          MANUAL_COMMIT_ID="${{ github.event.inputs.manual_commit_id }}"
+
+          if [[ "$MANUAL_COMMIT_ID" == 'default' ]]; then
+            MANUAL_COMMIT_ID=$(git log --format="%P" -n 1)
+            MANUAL_COMMIT_ID=$(echo $MANUAL_COMMIT_ID | cut -d ' ' -f1)
+          fi
+
+          echo "Latest COMMIT ID = $LATEST_COMMIT_ID"
+          echo "Previous COMMIT ID = $MANUAL_COMMIT_ID"
+
+          sfdx sfpowerkit:project:diff -r $MANUAL_COMMIT_ID -t $LATEST_COMMIT_ID -d Delta_pkg
+
+          if [ ! -d "Delta_pkg" ]; then
+            echo "No diff found, exiting."
+            exit 1
+          fi
+
+      - name: Authenticate and deploy
+        run: |
+          TEST_LEVEL="${{ github.event.inputs.test_level }}"
+          TEST_CLASSES="${{ github.event.inputs.test_classes }}"
+
+          if [[ "$TEST_LEVEL" == 'RunSpecifiedTests' ]]; then
+            TEST_CLASSES=$(echo $TEST_CLASSES | tr -d ' ')
+            if [[ -z "$TEST_CLASSES" ]]; then
+              echo "Please specify the Test Classes Names to run."
+              exit 1
+            else
+              TEST_LEVEL="$TEST_LEVEL -r $TEST_CLASSES"
+            fi
+          fi
+
+          echo "Authenticating QA"
+          sfdx force:auth:jwt:grant --clientid $TRN_ORG_CLIENTID --jwtkeyfile ./server.key --username $DEV_USERNAME --instanceurl $DEV_URL
+          echo "Validation"
+          sfdx force:source:deploy -c -p Delta_pkg/force-app -u $DEV_USERNAME -l "$TEST_LEVEL"
+          echo "Deployment"
+          sfdx force:source:deploy -p Delta_pkg/force-app -u $DEV_USERNAME -l "$TEST_LEVEL"          
+
+          echo "🎉 Deployment completed successfully"          

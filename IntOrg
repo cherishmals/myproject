@@ -1,4 +1,4 @@
-name: Int- Org
+name: Int-Org
 
 on:
   workflow_dispatch:

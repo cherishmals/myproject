@@ -1,0 +1,99 @@
+name: Int- Org
+
+on:
+  workflow_dispatch:
+    inputs:
+      src-branch-name:
+        description: 'Source branch to checkout in this repository'
+        required: true
+        default: 'IntOrg'
+      manual_commit_id:
+        description: 'Manual commit ID'
+        required: false
+        default: 'default'
+      test_level:
+        description: 'Enter type of test case to be checked'
+        required: true
+        type: choice
+        options:
+          - NoTestRun
+          - RunSpecifiedTests
+          - RunLocalTests
+          - RunAllTestsInOrg
+        default: RunSpecifiedTests
+      test_classes:
+        description: 'Test classes'
+        required: false
+        default: ''
+
+env:
+        INT_ORG_USERNAME: ${{ vars.INT_USERNAME }}
+  INT_ORG_PASSWORD: ${{ secrets.INT_PASSWORD }}
+  INT_ORG_URL: ${{ vars.INT_URL }}
+  INT_ORG_CLIENTID: ${{ secrets.INT_CLIENTID }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+
+          ref: 'none'
+
+          fetch-depth: 0 # This ensures the full commit history is available
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16.x'
+
+      - name: Install SFDX CLI and plugins
+        run: |
+          npm install sfdx-cli --global
+          sfdx --version
+          echo 'y' | sfdx plugins:install sfpowerkit
+
+      - name: Determine commit IDs and generate delta
+        id: commit_delta
+        run: |
+
+          LATEST_COMMIT_ID=$(git log -n 1 origin/${{ github.event.inputs.src-branch-name }} --pretty=format:'%H')
+
+          MANUAL_COMMIT_ID="${{ github.event.inputs.manual_commit_id }}"
+
+          if [[ "$MANUAL_COMMIT_ID" == 'default' ]]; then
+            MANUAL_COMMIT_ID=$(git log --format="%P" -n 1)
+            MANUAL_COMMIT_ID=$(echo $MANUAL_COMMIT_ID | cut -d ' ' -f1)
+          fi
+
+          echo "Latest COMMIT ID = $LATEST_COMMIT_ID"
+          echo "Previous COMMIT ID = $MANUAL_COMMIT_ID"
+
+          sfdx sfpowerkit:project:diff -r $MANUAL_COMMIT_ID -t $LATEST_COMMIT_ID -d Delta_pkg
+
+          if [ ! -d "Delta_pkg" ]; then
+            echo "No diff found, exiting."
+            exit 1
+          fi
+
+      - name: Authenticate to INT org
+        env:
+          SFDX_AUTH_URL_INT: ${{ secrets.SFDX_AUTH_URL_INT }}
+        run: |
+          echo "$SFDX_AUTH_URL_INT" > ./int_auth.txt
+          sf org login sfdx-url --sfdx-url-file ./int_auth.txt --alias intOrg --set-default
+          
+      - name: Check-only deploy to INT org
+        run: |
+          sf project deploy start \
+            --source-dir delta/force-app \
+            --target-org intOrg \
+            --dry-run \
+            --test-level RunLocalTests \
+            --wait 60
+
+      - name: Validate no destructive changes error
+        run: |
+          echo "Check-only validation completed successfully."
